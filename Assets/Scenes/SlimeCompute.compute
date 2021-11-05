@@ -1,0 +1,128 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#pragma kernel ProcessTrails
+
+#define PI 3.14159
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct Agent
+{
+    float2 position;
+    float angle;
+};
+
+RWTexture2D<float4> TrailMap;
+RWStructuredBuffer<Agent> agents;
+RWTexture2D<float4> DiffusedTrailMap;
+
+int width;
+int height;
+float deltaTime;
+float moveSpeed;
+int numAgents;
+float evaporateSpeed;
+float diffuseSpeed;
+float sensorOffsetDst;
+int sensorSize;
+float sensorAngleSpacing;
+float turnSpeed;
+float time;
+
+uint hash(uint state) 
+{
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state;
+}
+
+float hash01(uint state)
+{
+    return saturate(hash(state) / 4294967295.0);
+}
+
+float mod(float x, float y)
+{
+  return x - y * floor(x/y);
+}
+
+float Sense(Agent agent, float offset)
+{
+    float sensorAngle = agent.angle + offset;
+    float2 sensorDir = float2(cos(sensorAngle), sin(sensorAngle));
+    int2 sensorCentre = agent.position + sensorDir * sensorOffsetDst;
+    float sum = 0;
+
+    for(int x = -sensorSize; x <= sensorSize; x++)
+        for(int y = -sensorSize; y <= sensorSize; y++)
+        {
+            int2 pos = sensorCentre + int2(x, y);
+             if (pos.x >= 0 && pos.x < width && pos.y >=0 && pos.y < height)
+                sum += (TrailMap[pos].x + TrailMap[pos].y + TrailMap[pos].z) / 3.0;
+        }
+
+    return sum;
+}
+
+[numthreads(64,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)numAgents) return;
+
+    float random = hash01(agents[id.x].position.y * width + agents[id.x].position.x + hash(id.x + time * 10000));
+
+    // Steer
+    float weightForward = Sense(agents[id.x], 0);
+    float weightLeft = Sense(agents[id.x], sensorAngleSpacing);
+    float weightRight = Sense(agents[id.x], - sensorAngleSpacing);
+
+    float randomSteerStrength = random;
+
+    if (weightForward > weightLeft && weightForward > weightRight)
+        agents[id.x].angle += 0;
+    else if (weightForward < weightLeft && weightForward < weightRight)
+        agents[id.x].angle += (randomSteerStrength - 0.5) * 2 * turnSpeed * deltaTime;
+    else if (weightRight > weightLeft)
+        agents[id.x].angle -= randomSteerStrength * turnSpeed * deltaTime;
+    else if (weightLeft > weightRight)
+        agents[id.x].angle += randomSteerStrength * turnSpeed * deltaTime;
+
+    // Update position
+    float2 direction = float2(cos(agents[id.x].angle), sin(agents[id.x].angle));
+    float2 newPos = agents[id.x].position + (direction * moveSpeed * deltaTime);
+
+    if (newPos.x < 0 || newPos.x >= width || newPos.y < 0 || newPos.y >= height)
+    {
+        newPos.x = min(width, max(0, newPos.x));
+        newPos.y = min(height, max(0, newPos.y));
+        agents[id.x].angle = random * 2 * PI;
+    }
+    else
+    {
+        TrailMap[int2(newPos.x, newPos.y)] += 0.25 * deltaTime;
+    }
+
+    agents[id.x].position = newPos;
+}
+
+[numthreads(8, 8, 1)]
+void ProcessTrails(uint3 id : SV_DispatchThreadID)
+{
+    float4 sum = 0;
+    float4 originalCol = TrailMap[id.xy];
+    for(int x = -1; x <= 1; x++)
+        for(int y = -1; y <= 1; y++)
+            sum += TrailMap[int2(min(max(0, id.x + x), width - 1), min(max(0, id.y + y), height - 1))];
+
+    sum /= 9;
+
+    float diffuseWeight = saturate(diffuseSpeed * deltaTime);
+    sum = originalCol * (1 - diffuseWeight) + sum * diffuseWeight;
+
+
+   TrailMap[id.xy] = sum * saturate(1-evaporateSpeed * deltaTime);
+}
